@@ -1,0 +1,161 @@
+name: 01 - Deploy main release candidate to it-dev
+
+"on":
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: Release ID created in the Project Registry App
+        required: true
+        type: string
+      commit_sha:
+        description: Full commit SHA from main
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: demo-dev-${{ inputs.release_id }}
+  cancel-in-progress: false
+
+jobs:
+  deploy-dev:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out the exact main commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 0
+
+      - name: Confirm commit is on main
+        env:
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+        run: |
+          git fetch origin main --no-tags
+          git merge-base --is-ancestor "$COMMIT_SHA" origin/main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@v1.8.0
+
+      - name: Install CI dependencies
+        run: pip install --disable-pip-version-check -r ci/requirements.txt
+
+      - name: Read release and generated project ID from the Registry
+        id: release
+        env:
+          REGISTRY_DATABRICKS_HOST: ${{ vars.REGISTRY_DATABRICKS_HOST }}
+          REGISTRY_DATABRICKS_TOKEN: ${{ secrets.REGISTRY_DATABRICKS_TOKEN }}
+          REGISTRY_WAREHOUSE_ID: ${{ vars.REGISTRY_WAREHOUSE_ID }}
+          REGISTRY_CATALOG: it_dev
+          REGISTRY_SCHEMA: project_registry
+        run: |
+          python ci/registry_gate.py release-info \
+            --release-id "${{ inputs.release_id }}" \
+            --commit-sha "${{ inputs.commit_sha }}" \
+            --repository "${{ github.repository }}" > release-info.json
+
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          data = json.load(open("release-info.json", encoding="utf-8"))
+          for key in ("project_id", "dev_target", "bundle_path"):
+              print(f"{key}={data[key]}")
+          PY
+
+      - name: Resolve and enforce the dev Bundle
+        env:
+          DATABRICKS_HOST: ${{ vars.DEV_DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DEV_DATABRICKS_TOKEN }}
+          PROJECT_ID: ${{ steps.release.outputs.project_id }}
+          TARGET: ${{ steps.release.outputs.dev_target }}
+          BUNDLE_PATH: ${{ steps.release.outputs.bundle_path }}
+        run: |
+          cd "$BUNDLE_PATH"
+          databricks bundle validate -t "$TARGET" \
+            --var="project_id=$PROJECT_ID" \
+            --output json > "$GITHUB_WORKSPACE/resolved-dev.json"
+
+          python "$GITHUB_WORKSPACE/ci/check_bundle.py" \
+            --resolved-json "$GITHUB_WORKSPACE/resolved-dev.json" \
+            --project-id "$PROJECT_ID" \
+            --environment dev \
+            --catalog it_dev \
+            --schema sample_project
+
+      - name: Deploy exact main commit to it-dev
+        env:
+          DATABRICKS_HOST: ${{ vars.DEV_DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DEV_DATABRICKS_TOKEN }}
+          PROJECT_ID: ${{ steps.release.outputs.project_id }}
+          TARGET: ${{ steps.release.outputs.dev_target }}
+          BUNDLE_PATH: ${{ steps.release.outputs.bundle_path }}
+        run: |
+          cd "$BUNDLE_PATH"
+          databricks bundle deploy -t "$TARGET" --var="project_id=$PROJECT_ID"
+          databricks bundle run -t "$TARGET" car_data_refresh --var="project_id=$PROJECT_ID"
+          databricks bundle summary -t "$TARGET" \
+            --var="project_id=$PROJECT_ID" \
+            --output json > "$GITHUB_WORKSPACE/summary-dev.json"
+
+      - name: Apply and read back dev tags
+        env:
+          DATABRICKS_HOST: ${{ vars.DEV_DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.DEV_DATABRICKS_TOKEN }}
+          PROJECT_ID: ${{ steps.release.outputs.project_id }}
+        run: |
+          python ci/tag_assets.py \
+            --summary-json summary-dev.json \
+            --project-id "$PROJECT_ID" \
+            --environment dev \
+            --catalog it_dev \
+            --schema sample_project \
+            --table car_makes \
+            --table car_models \
+            --output tag-results-dev.json
+
+      - name: Mark release READY_FOR_APPROVAL
+        if: success()
+        env:
+          REGISTRY_DATABRICKS_HOST: ${{ vars.REGISTRY_DATABRICKS_HOST }}
+          REGISTRY_DATABRICKS_TOKEN: ${{ secrets.REGISTRY_DATABRICKS_TOKEN }}
+          REGISTRY_WAREHOUSE_ID: ${{ vars.REGISTRY_WAREHOUSE_ID }}
+          REGISTRY_CATALOG: it_dev
+          REGISTRY_SCHEMA: project_registry
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python ci/registry_gate.py record-dev \
+            --release-id "${{ inputs.release_id }}" \
+            --commit-sha "${{ inputs.commit_sha }}" \
+            --repository "${{ github.repository }}" \
+            --tag-results tag-results-dev.json \
+            --run-url "$RUN_URL"
+
+      - name: Record failed dev validation
+        if: failure() && steps.release.outcome == 'success'
+        env:
+          REGISTRY_DATABRICKS_HOST: ${{ vars.REGISTRY_DATABRICKS_HOST }}
+          REGISTRY_DATABRICKS_TOKEN: ${{ secrets.REGISTRY_DATABRICKS_TOKEN }}
+          REGISTRY_WAREHOUSE_ID: ${{ vars.REGISTRY_WAREHOUSE_ID }}
+          REGISTRY_CATALOG: it_dev
+          REGISTRY_SCHEMA: project_registry
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          EXTRA=""
+          if [ -f tag-results-dev.json ]; then
+            EXTRA="--tag-results tag-results-dev.json"
+          fi
+          python ci/registry_gate.py fail-dev \
+            --release-id "${{ inputs.release_id }}" \
+            --commit-sha "${{ inputs.commit_sha }}" \
+            --repository "${{ github.repository }}" \
+            --message "The main-branch release candidate failed it-dev deployment, execution, or tag verification." \
+            --run-url "$RUN_URL" \
+            $EXTRA

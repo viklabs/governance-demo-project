@@ -1,0 +1,30 @@
+resources:
+  jobs:
+    car_data_refresh:
+      name: ${var.project_id}-car-data-refresh
+      description: Refreshes two small managed Delta tables using serverless workflow compute.
+      max_concurrent_runs: 1
+
+      tags:
+        project_tag: ${var.project_id}
+        environment: ${var.environment_name}
+
+      tasks:
+        - task_key: refresh_car_tables
+          spark_python_task:
+            python_file: ../src/refresh_car_data.py
+            parameters:
+              - --catalog
+              - ${var.catalog_name}
+              - --schema
+              - ${var.schema_name}
+              - --project-id
+              - ${var.project_id}
+              - --environment
+              - ${var.environment_name}
+          environment_key: serverless
+
+      environments:
+        - environment_key: serverless
+          spec:
+            environment_version: "2"
