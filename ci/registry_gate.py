@@ -148,6 +148,38 @@ class Registry:
         row = self.fetch_one("SELECT current_user() AS current_user")
         return str((row or {}).get("current_user") or "unknown-ci-identity")
 
+    def project_by_repository(self, repository: str) -> dict[str, Any] | None:
+        repo = normalize_repository(repository)
+        return self.fetch_one(
+            f"""
+            SELECT p.*, c.repository_slug, c.bundle_path, c.dev_branch, c.prod_branch,
+                   c.dev_target, c.prod_target
+            FROM {self.cicd} c
+            JOIN {self.projects} p ON p.project_id = c.project_id
+            WHERE lower(c.repository_slug) = lower(:repository_slug)
+            LIMIT 1
+            """,
+            {"repository_slug": repo},
+        )
+
+    def checked_project(
+        self, repository: str, branch: str, environment: str
+    ) -> dict[str, Any]:
+        project = self.project_by_repository(repository)
+        if not project:
+            raise GateError("Repository is not registered in the v2 Project Registry.")
+        if str(project["lifecycle_status"]) != PROJECT_ACTIVE:
+            raise GateError("Project is not ACTIVE.")
+        expected_branch = (
+            str(project["dev_branch"]) if environment == "dev" else str(project["prod_branch"])
+        )
+        if branch.strip() != expected_branch:
+            raise GateError(
+                f"Branch {branch!r} does not match the registered {environment} branch "
+                f"{expected_branch!r}."
+            )
+        return project
+
     def release(self, release_id: str) -> dict[str, Any] | None:
         return self.fetch_one(
             f"""
@@ -267,6 +299,11 @@ def parser() -> argparse.ArgumentParser:
         command.add_argument("--commit-sha", required=True)
         command.add_argument("--repository", required=True)
 
+    project = commands.add_parser("project-info")
+    project.add_argument("--repository", required=True)
+    project.add_argument("--branch", required=True)
+    project.add_argument("--environment", choices=("dev", "prod"), required=True)
+
     info = commands.add_parser("release-info")
     identity(info)
 
@@ -299,6 +336,24 @@ def main() -> int:
     try:
         registry = Registry()
         actor = registry.current_user()
+
+        if args.command == "project-info":
+            project = registry.checked_project(args.repository, args.branch, args.environment)
+            emit(
+                {
+                    "project_id": project["project_id"],
+                    "project_name": project["name"],
+                    "repository": project["repository_slug"],
+                    "bundle_path": project["bundle_path"],
+                    "dev_branch": project["dev_branch"],
+                    "prod_branch": project["prod_branch"],
+                    "dev_target": project["dev_target"],
+                    "prod_target": project["prod_target"],
+                    "environment": args.environment,
+                }
+            )
+            return 0
+
         release = registry.checked_release(args.release_id, args.commit_sha, args.repository)
 
         if args.command == "release-info":

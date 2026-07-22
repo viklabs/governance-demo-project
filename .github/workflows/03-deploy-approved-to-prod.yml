@@ -1,14 +1,14 @@
-name: 01 - Deploy main release candidate to it-dev
+name: 03 - Deploy App-approved SHA to it-prod
 
 "on":
   workflow_dispatch:
     inputs:
       release_id:
-        description: Release ID created in the Project Registry App
+        description: App-approved release ID
         required: true
         type: string
       commit_sha:
-        description: Full commit SHA from main
+        description: Exact approved commit SHA from the production branch
         required: true
         type: string
 
@@ -16,27 +16,20 @@ permissions:
   contents: read
 
 concurrency:
-  group: demo-dev-${{ inputs.release_id }}
+  group: car-demo-prod-${{ inputs.release_id }}
   cancel-in-progress: false
 
 jobs:
-  deploy-dev:
+  deploy-prod:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
-      - name: Check out the exact main commit
+      - name: Check out the exact approved commit
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.commit_sha }}
           fetch-depth: 0
-
-      - name: Confirm commit is on main
-        env:
-          COMMIT_SHA: ${{ inputs.commit_sha }}
-        run: |
-          git fetch origin main --no-tags
-          git merge-base --is-ancestor "$COMMIT_SHA" origin/main
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -49,7 +42,7 @@ jobs:
       - name: Install CI dependencies
         run: pip install --disable-pip-version-check -r ci/requirements.txt
 
-      - name: Read release and generated project ID from the Registry
+      - name: Read release and generated project ID
         id: release
         env:
           REGISTRY_DATABRICKS_HOST: ${{ vars.REGISTRY_DATABRICKS_HOST }}
@@ -66,36 +59,59 @@ jobs:
           python - <<'PY' >> "$GITHUB_OUTPUT"
           import json
           data = json.load(open("release-info.json", encoding="utf-8"))
-          for key in ("project_id", "dev_target", "bundle_path"):
+          for key in ("project_id", "prod_target", "bundle_path", "prod_branch"):
               print(f"{key}={data[key]}")
           PY
 
-      - name: Resolve and enforce the dev Bundle
+      - name: Confirm commit still belongs to production branch
         env:
-          DATABRICKS_HOST: ${{ vars.DEV_DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.DEV_DATABRICKS_TOKEN }}
+          COMMIT_SHA: ${{ inputs.commit_sha }}
+          PROD_BRANCH: ${{ steps.release.outputs.prod_branch }}
+        run: |
+          git fetch origin "$PROD_BRANCH" --no-tags
+          git merge-base --is-ancestor "$COMMIT_SHA" "origin/$PROD_BRANCH"
+
+      - name: Resolve and enforce production Bundle tags
+        env:
+          DATABRICKS_HOST: ${{ vars.PROD_DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.PROD_DATABRICKS_TOKEN }}
           PROJECT_ID: ${{ steps.release.outputs.project_id }}
-          TARGET: ${{ steps.release.outputs.dev_target }}
+          TARGET: ${{ steps.release.outputs.prod_target }}
           BUNDLE_PATH: ${{ steps.release.outputs.bundle_path }}
         run: |
           cd "$BUNDLE_PATH"
           databricks bundle validate -t "$TARGET" \
             --var="project_id=$PROJECT_ID" \
-            --output json > "$GITHUB_WORKSPACE/resolved-dev.json"
+            --output json > "$GITHUB_WORKSPACE/resolved-prod.json"
 
           python "$GITHUB_WORKSPACE/ci/check_bundle.py" \
-            --resolved-json "$GITHUB_WORKSPACE/resolved-dev.json" \
+            --resolved-json "$GITHUB_WORKSPACE/resolved-prod.json" \
             --project-id "$PROJECT_ID" \
-            --environment dev \
-            --catalog it_dev \
+            --environment prod \
+            --catalog it_prod \
             --schema sample_project
 
-      - name: Deploy exact main commit to it-dev
+      - name: Acquire App production authorization
+        id: authorize
         env:
-          DATABRICKS_HOST: ${{ vars.DEV_DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.DEV_DATABRICKS_TOKEN }}
+          REGISTRY_DATABRICKS_HOST: ${{ vars.REGISTRY_DATABRICKS_HOST }}
+          REGISTRY_DATABRICKS_TOKEN: ${{ secrets.REGISTRY_DATABRICKS_TOKEN }}
+          REGISTRY_WAREHOUSE_ID: ${{ vars.REGISTRY_WAREHOUSE_ID }}
+          REGISTRY_CATALOG: it_dev
+          REGISTRY_SCHEMA: project_registry
+        run: |
+          python ci/registry_gate.py authorize-prod \
+            --release-id "${{ inputs.release_id }}" \
+            --commit-sha "${{ inputs.commit_sha }}" \
+            --repository "${{ github.repository }}"
+
+      - name: Deploy and run same commit in it-prod
+        id: deploy
+        env:
+          DATABRICKS_HOST: ${{ vars.PROD_DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.PROD_DATABRICKS_TOKEN }}
           PROJECT_ID: ${{ steps.release.outputs.project_id }}
-          TARGET: ${{ steps.release.outputs.dev_target }}
+          TARGET: ${{ steps.release.outputs.prod_target }}
           BUNDLE_PATH: ${{ steps.release.outputs.bundle_path }}
         run: |
           cd "$BUNDLE_PATH"
@@ -103,25 +119,26 @@ jobs:
           databricks bundle run -t "$TARGET" car_data_refresh --var="project_id=$PROJECT_ID"
           databricks bundle summary -t "$TARGET" \
             --var="project_id=$PROJECT_ID" \
-            --output json > "$GITHUB_WORKSPACE/summary-dev.json"
+            --output json > "$GITHUB_WORKSPACE/summary-prod.json"
 
-      - name: Apply and read back dev tags
+      - name: Apply and read back production tags
+        id: tags
         env:
-          DATABRICKS_HOST: ${{ vars.DEV_DATABRICKS_HOST }}
-          DATABRICKS_TOKEN: ${{ secrets.DEV_DATABRICKS_TOKEN }}
+          DATABRICKS_HOST: ${{ vars.PROD_DATABRICKS_HOST }}
+          DATABRICKS_TOKEN: ${{ secrets.PROD_DATABRICKS_TOKEN }}
           PROJECT_ID: ${{ steps.release.outputs.project_id }}
         run: |
           python ci/tag_assets.py \
-            --summary-json summary-dev.json \
+            --summary-json summary-prod.json \
             --project-id "$PROJECT_ID" \
-            --environment dev \
-            --catalog it_dev \
+            --environment prod \
+            --catalog it_prod \
             --schema sample_project \
             --table car_makes \
             --table car_models \
-            --output tag-results-dev.json
+            --output tag-results-prod.json
 
-      - name: Mark release READY_FOR_APPROVAL
+      - name: Record successful production deployment
         if: success()
         env:
           REGISTRY_DATABRICKS_HOST: ${{ vars.REGISTRY_DATABRICKS_HOST }}
@@ -131,15 +148,17 @@ jobs:
           REGISTRY_SCHEMA: project_registry
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          python ci/registry_gate.py record-dev \
+          python ci/registry_gate.py complete-prod \
             --release-id "${{ inputs.release_id }}" \
             --commit-sha "${{ inputs.commit_sha }}" \
             --repository "${{ github.repository }}" \
-            --tag-results tag-results-dev.json \
-            --run-url "$RUN_URL"
+            --status DEPLOYED \
+            --tag-results tag-results-prod.json \
+            --run-url "$RUN_URL" \
+            --message "The approved commit was deployed to it-prod and all required tags were verified."
 
-      - name: Record failed dev validation
-        if: failure() && steps.release.outcome == 'success'
+      - name: Record failed production deployment
+        if: failure() && steps.authorize.outcome == 'success'
         env:
           REGISTRY_DATABRICKS_HOST: ${{ vars.REGISTRY_DATABRICKS_HOST }}
           REGISTRY_DATABRICKS_TOKEN: ${{ secrets.REGISTRY_DATABRICKS_TOKEN }}
@@ -149,13 +168,14 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           EXTRA=""
-          if [ -f tag-results-dev.json ]; then
-            EXTRA="--tag-results tag-results-dev.json"
+          if [ -f tag-results-prod.json ]; then
+            EXTRA="--tag-results tag-results-prod.json"
           fi
-          python ci/registry_gate.py fail-dev \
+          python ci/registry_gate.py complete-prod \
             --release-id "${{ inputs.release_id }}" \
             --commit-sha "${{ inputs.commit_sha }}" \
             --repository "${{ github.repository }}" \
-            --message "The main-branch release candidate failed it-dev deployment, execution, or tag verification." \
+            --status FAILED \
             --run-url "$RUN_URL" \
+            --message "The production deployment or tag verification failed." \
             $EXTRA
