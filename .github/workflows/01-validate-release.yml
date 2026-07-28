@@ -1,0 +1,60 @@
+name: 01 - Validate exact release in it-dev
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: Release ID created in the Governance App
+        required: true
+        type: string
+      source_revision:
+        description: Exact full Git commit SHA stored on the release
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      GOVERNANCE_APP_URL: ${{ vars.GOVERNANCE_APP_URL }}
+      GOVERNANCE_CI_PACKAGE: ${{ vars.GOVERNANCE_CI_PACKAGE }}
+
+      REGISTRY_DATABRICKS_HOST: ${{ vars.REGISTRY_DATABRICKS_HOST }}
+      REGISTRY_DATABRICKS_AUTH_TYPE: oauth-m2m
+      REGISTRY_DATABRICKS_CLIENT_ID: ${{ vars.DEV_CI_CLIENT_ID }}
+      REGISTRY_DATABRICKS_CLIENT_SECRET: ${{ secrets.DEV_CI_CLIENT_SECRET }}
+
+      DEV_DATABRICKS_HOST: ${{ vars.DEV_DATABRICKS_HOST }}
+      DEV_DATABRICKS_AUTH_TYPE: oauth-m2m
+      DEV_DATABRICKS_CLIENT_ID: ${{ vars.DEV_CI_CLIENT_ID }}
+      DEV_DATABRICKS_CLIENT_SECRET: ${{ secrets.DEV_CI_CLIENT_SECRET }}
+
+    steps:
+      - name: Check out exact release revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.source_revision }}
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install Databricks CLI
+        uses: databricks/setup-cli@v1.9.0
+
+      - name: Install centrally maintained governance client
+        run: python -m pip install "$GOVERNANCE_CI_PACKAGE"
+
+      - name: Validate, deploy, run, and verify tags in it-dev
+        run: >-
+          governance-ci validate-release
+          --app-url "$GOVERNANCE_APP_URL"
+          --release-id "${{ inputs.release_id }}"
+          --source-revision "${{ inputs.source_revision }}"
+          --source-dir .
+          --run-url "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"

@@ -68,11 +68,6 @@ def main() -> None:
     spark = SparkSession.getActiveSession() or SparkSession.builder.getOrCreate()
     loaded_at = datetime.now(timezone.utc)
 
-    spark.sql(
-        f"CREATE SCHEMA IF NOT EXISTS {quoted(catalog)}.{quoted(schema)} "
-        "COMMENT 'Governed schema for the car reference ETL demonstration'"
-    )
-
     makes_schema = StructType(
         [
             StructField("make_id", IntegerType(), False),

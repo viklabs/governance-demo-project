@@ -1,9 +1,7 @@
 .databricks/
 __pycache__/
 *.pyc
-*.pyo
-*.log
+.venv/
 resolved-*.json
 summary-*.json
 tag-results-*.json
-release-info.json

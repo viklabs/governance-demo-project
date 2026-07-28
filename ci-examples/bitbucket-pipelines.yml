@@ -1,0 +1,29 @@
+image: python:3.12
+
+pipelines:
+  custom:
+    validate-governed-release:
+      - variables:
+          - name: RELEASE_ID
+          - name: SOURCE_REVISION
+      - step:
+          name: Validate exact release in it-dev
+          script:
+            - git fetch --all
+            - git checkout "$SOURCE_REVISION"
+            - curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/v1.9.0/install.sh | sh
+            - python -m pip install "$GOVERNANCE_CI_PACKAGE"
+            - governance-ci validate-release --app-url "$GOVERNANCE_APP_URL" --release-id "$RELEASE_ID" --source-revision "$SOURCE_REVISION" --source-dir .
+    deploy-approved-production:
+      - variables:
+          - name: RELEASE_ID
+          - name: SOURCE_REVISION
+      - step:
+          name: Deploy App-approved exact release
+          deployment: production
+          script:
+            - git fetch --all
+            - git checkout "$SOURCE_REVISION"
+            - curl -fsSL https://raw.githubusercontent.com/databricks/setup-cli/v1.9.0/install.sh | sh
+            - python -m pip install "$GOVERNANCE_CI_PACKAGE"
+            - governance-ci deploy-prod --app-url "$GOVERNANCE_APP_URL" --release-id "$RELEASE_ID" --source-revision "$SOURCE_REVISION" --source-dir .

@@ -1,0 +1,25 @@
+{
+  "name": "Governed Car ETL Demo",
+  "team_name": "Data Engineering",
+  "technical_owner_email": "vireddy1@silabs.com",
+  "business_owner_email": "vireddy1@silabs.com",
+  "description": "Small serverless ETL project used to demonstrate tag validation and App-controlled production approval.",
+  "data_classification": "Internal",
+  "cicd": {
+    "repository_uri": "https://github.com/viklabs/governance-demo-project",
+    "bundle_path": ".",
+    "dev_target": "dev",
+    "prod_target": "prod",
+    "dev_catalog": "it_dev",
+    "dev_schema": "sample_project_v3",
+    "prod_catalog": "it_prod",
+    "prod_schema": "sample_project_v3",
+    "validation_resources": [
+      {"type": "job", "key": "car_data_refresh"}
+    ],
+    "additional_assets": [],
+    "authorized_submitters": [
+      "REPLACE-WITH-DEV-CI-ACTOR-FROM-API-V3-ME"
+    ]
+  }
+}
