@@ -48,7 +48,6 @@ The same Git branch may be used for dev and prod. Branch/ref is optional display
 7. Run **02 - Deploy App-approved release to it-prod** with the same release ID and SHA.
 8. Run `sql/verify.sql`.
 
-## Negative tag test
 
 Remove `project_tag` from `resources/car_demo.job.yml`, commit the change, create a new release, and run Workflow 01. Bundle policy must fail and the release must become `CHECKS_FAILED`; it cannot appear in the approval queue.
 
