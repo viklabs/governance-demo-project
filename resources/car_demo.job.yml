@@ -6,7 +6,7 @@ resources:
       max_concurrent_runs: 1
 
       tags:
-        # project_tag: ${var.project_id}
+        project_tag: ${var.project_id}
         environment: ${var.environment_name}
 
       tasks:
